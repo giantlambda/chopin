@@ -44,6 +44,7 @@ export function AddProjectDialog(
 	let [query, setQuery] = useState("");
 	let [retry, setRetry] = useState(0);
 	let [adding, setAdding] = useState<string>();
+	let gh = Api.authMode() === "gh";
 
 	useEffect(() => {
 		let active = true;
@@ -138,10 +139,12 @@ export function AddProjectDialog(
 							<div className="navigation-palette-status flex-col gap-1 text-center" role="status">
 								<p className="font-medium text-text-primary">No repositories to add yet</p>
 								<p className="max-w-[40ch] text-text-tertiary">
-									Install the GitHub App for Chopin on the repositories you want to write about.
+									{gh
+										? "Chopin lists the repositories your GitHub CLI login can reach."
+										: "Install the GitHub App for Chopin on the repositories you want to write about."}
 								</p>
 								<a className="btn btn-sm btn-primary mt-2" href="/auth/github/install">
-									Install the GitHub App for Chopin
+									{gh ? "Manage repository access" : "Install the GitHub App for Chopin"}
 								</a>
 							</div>
 						)

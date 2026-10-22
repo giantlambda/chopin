@@ -7,8 +7,8 @@ import { clearRepositoryCache } from "./repository-cache";
 
 let loadHostedLogin = () => import("./hosted-login");
 let HostedLogin = lazy(() => loadHostedLogin().then(module => ({ default: module.HostedLogin })));
-let LocalLogin = lazy(() =>
-	import("./local-login").then(module => ({ default: module.LocalLogin }))
+let LoopbackLogin = lazy(() =>
+	import("./local-login").then(module => ({ default: module.LoopbackLogin }))
 );
 
 export function App() {
@@ -76,7 +76,7 @@ export function App() {
 	if (!session.user) {
 		return (
 			<Suspense fallback={<HostedLoading />}>
-				{session.auth === "local" ? <LocalLogin /> : <HostedLogin />}
+				{session.auth ? <LoopbackLogin auth={session.auth} /> : <HostedLogin />}
 			</Suspense>
 		);
 	}

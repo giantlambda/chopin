@@ -147,7 +147,7 @@ export class LocalAuth {
 		return {
 			installation: this.#config.local!.installation,
 			origin: this.#config.origin,
-			clientId: this.#config.clientId,
+			clientId: this.#config.clientId!,
 			bindingId,
 		};
 	}
@@ -197,7 +197,7 @@ export class LocalAuth {
 		if (previous) this.cancel(request);
 		let controller = new AbortController();
 		let code = await this.#device.request(
-			this.#config.clientId,
+			this.#config.clientId!,
 			AbortSignal.any([controller.signal, AbortSignal.timeout(15_000)]),
 		);
 		let id = crypto.randomUUID();
@@ -277,7 +277,7 @@ export class LocalAuth {
 			let answer;
 			try {
 				answer = await this.#device.poll(
-					this.#config.clientId,
+					this.#config.clientId!,
 					attempt.code.deviceCode,
 					AbortSignal.any([
 						attempt.controller.signal,
@@ -505,7 +505,7 @@ export class LocalAuth {
 		try {
 			if (record.accessExpiresAt <= this.#clock() + EARLY_MS) {
 				let grant = await this.#github.refresh({
-					clientId: this.#config.clientId,
+					clientId: this.#config.clientId!,
 					refreshToken: record.refreshToken,
 				});
 				if (this.#revoked.has(binding.id)) return { clear: true };

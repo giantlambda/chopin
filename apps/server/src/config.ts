@@ -336,11 +336,14 @@ export function load(): Config {
 export function describe(config: Config): string {
 	let users = config.auth.allowedUsers?.size ?? 0;
 	let organizations = config.auth.allowedOrganizations?.size ?? 0;
+	let flow = config.auth.local
+		? " local device flow"
+		: config.auth.gh
+		? " CLI login"
+		: "";
 	let admission = users || organizations
-		? `auth: github${
-			config.auth.local ? " local device flow" : ""
-		} (restricted: ${users} users, ${organizations} organizations)`
-		: `auth: github${config.auth.local ? " local device flow" : ""} (unrestricted)`;
+		? `auth: github${flow} (restricted: ${users} users, ${organizations} organizations)`
+		: `auth: github${flow} (unrestricted)`;
 	let parts = [
 		config.devClient ? `client: vite (${config.devClient})` : "client: built",
 		config.agent

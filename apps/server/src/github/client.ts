@@ -682,6 +682,39 @@ export class GitHubClient implements GitHub, GitHubReferenceSource {
 		return etag ? { ...result, etag } : result;
 	}
 
+	/** The repositories a token's user owns, collaborates on, or reaches through organizations. */
+	userRepositories(token: string, page: number): Promise<RepositoryPage>;
+	userRepositories(
+		token: string,
+		page: number,
+		condition: GitHubCondition,
+	): Promise<GitHubConditional<RepositoryPage>>;
+	async userRepositories(
+		token: string,
+		page: number,
+		condition?: GitHubCondition,
+	): Promise<GitHubConditional<RepositoryPage>> {
+		let path = "/user/repos";
+		let url = new URL(path, this.#endpoints.api);
+		url.searchParams.set("per_page", "100");
+		url.searchParams.set("page", String(page));
+		url.searchParams.set("sort", "full_name");
+		url.searchParams.set("affiliation", "owner,collaborator,organization_member");
+		let response = await this.#request(url, token, condition?.ifNoneMatch);
+		if (response.status === 304) {
+			let etag = response.headers.get("etag") ?? condition?.ifNoneMatch;
+			return { notModified: true, ...(etag ? { etag } : {}) };
+		}
+		let value = await body(response);
+		if (!Array.isArray(value)) throw new GitHubError("GitHub returned an invalid repository list");
+		let result: RepositoryPage = {
+			repositories: value.map(repository),
+			nextPage: nextPage(response.headers.get("link"), this.#endpoints.api, path),
+		};
+		let etag = condition && response.headers.get("etag");
+		return etag ? { ...result, etag } : result;
+	}
+
 	async repository(token: string, owner: string, name: string): Promise<Repository> {
 		let path = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}`;
 		return repository(await this.#api(path, token));
@@ -890,6 +923,145 @@ export class GitHubClient implements GitHub, GitHubReferenceSource {
 			throw new GitHubError("GitHub API rejected the request", status);
 		}
 		return response;
+	}
+}
+
+/** The GitHub CLI's OAuth app, where a gh token's organization access is requested and granted. */
+export const GH_CLI_APP_SETTINGS =
+	"https://github.com/settings/connections/applications/178c6fc778ccc68e1d6a";
+
+function tokenInstallation(account: GitHubInstallation["account"]): GitHubInstallation {
+	return {
+		id: "0",
+		account,
+		repositorySelection: "all",
+		configureUrl: GH_CLI_APP_SETTINGS,
+		suspended: false,
+		permissions: {
+			contents: true,
+			pullRequests: true,
+			checks: true,
+			statuses: true,
+			issues: true,
+		},
+		writable: { contents: true, pullRequests: true },
+	};
+}
+
+/**
+ * AUTH_MODE=gh has no GitHub App: one synthetic installation stands for every repository the
+ * token's user reaches, and repository access is the token's own role on the repository.
+ */
+export class GitHubTokenClient extends GitHubClient {
+	readonly #clock: () => number;
+	readonly #access = new Map<
+		string,
+		{ expiresAt: number; repository: Promise<Repository | undefined> }
+	>();
+
+	constructor(options: Options = {}) {
+		super(options);
+		this.#clock = options.clock ?? Date.now;
+	}
+
+	override installations(token: string, page: number): Promise<InstallationPage>;
+	override installations(
+		token: string,
+		page: number,
+		condition: GitHubCondition,
+	): Promise<GitHubConditional<InstallationPage>>;
+	override async installations(
+		token: string,
+		page: number,
+		_condition?: GitHubCondition,
+	): Promise<GitHubConditional<InstallationPage>> {
+		if (page > 1) return { installations: [], nextPage: undefined };
+		let user = await this.user(token);
+		return {
+			installations: [
+				tokenInstallation({ login: user.login, avatarUrl: user.avatarUrl, type: "user" }),
+			],
+			nextPage: undefined,
+		};
+	}
+
+	override installationRepositories(
+		token: string,
+		installationId: string,
+		page: number,
+	): Promise<RepositoryPage>;
+	override installationRepositories(
+		token: string,
+		installationId: string,
+		page: number,
+		condition: GitHubCondition,
+	): Promise<GitHubConditional<RepositoryPage>>;
+	override async installationRepositories(
+		token: string,
+		installationId: string,
+		page: number,
+		condition?: GitHubCondition,
+	): Promise<GitHubConditional<RepositoryPage>> {
+		if (installationId !== "0") throw new GitHubError("installation not found", 404);
+		return condition
+			? this.userRepositories(token, page, condition)
+			: this.userRepositories(token, page);
+	}
+
+	override async repositoryAccess(
+		token: string,
+		owner: string,
+		name: string,
+	): Promise<Repository | undefined> {
+		let now = this.#clock();
+		for (let [key, entry] of this.#access) {
+			if (entry.expiresAt <= now) this.#access.delete(key);
+		}
+		let key = `${tokenKey(token)} ${`${owner}/${name}`.toLowerCase()}`;
+		let cached = this.#access.get(key);
+		if (!cached) {
+			cached = {
+				expiresAt: now + ACCESS_CACHE_MS,
+				repository: this.repository(token, owner, name).catch(err => {
+					// Forbidden or missing is no access, as an uninstalled repository is for the App.
+					if (err instanceof GitHubError && (err.status === 403 || err.status === 404)) {
+						return undefined;
+					}
+					throw err;
+				}),
+			};
+			this.#access.set(key, cached);
+		}
+		try {
+			return await cached.repository;
+		} catch (err) {
+			if (this.#access.get(key) === cached) this.#access.delete(key);
+			throw err;
+		}
+	}
+
+	override async installedRepository(
+		token: string,
+		owner: string,
+		name: string,
+	): Promise<InstalledRepository | undefined> {
+		let found = await this.repositoryAccess(token, owner, name);
+		return found && {
+			repository: found,
+			installation: tokenInstallation({
+				login: found.owner,
+				avatarUrl: found.ownerAvatarUrl ?? "",
+				type: "user",
+			}),
+		};
+	}
+
+	override invalidate(token: string): void {
+		super.invalidate(token);
+		let prefix = `${tokenKey(token)} `;
+		for (let key of this.#access.keys()) {
+			if (key.startsWith(prefix)) this.#access.delete(key);
+		}
 	}
 }
 import { createHash } from "node:crypto";

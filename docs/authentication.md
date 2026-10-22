@@ -224,7 +224,8 @@ AUTH_MODE=local DEMO_PERSONAS=on SERVER_HOST=127.0.0.1 APP_ORIGIN=http://127.0.0
 
 Sign in once with GitHub. Lily and Felix are fictional collaborators who use
 your existing repository permissions; they need no separate accounts. Demo
-personas require local mode and a loopback address. The flag defaults to off.
+personas require local or [GitHub CLI](#github-cli-sign-in-auth_modegh) mode
+and a loopback address. The flag defaults to off.
 
 A short demo:
 
@@ -247,6 +248,92 @@ collaboration, restart with `DEMO_PERSONAS=off` and reload the tabs.
 Run the browser rehearsal with `bun run e2e --project auth`. It uses two pages
 in one browser context, fake GitHub responses, and disposable PostgreSQL
 storage to exercise transport loss, reload, tab closure, and server restart.
+
+## GitHub CLI sign-in (`AUTH_MODE=gh`)
+
+`AUTH_MODE=gh` runs Chopin on the operator's own [GitHub CLI](https://cli.github.com)
+login, with no GitHub App: `GITHUB_APP_SLUG`, `GITHUB_APP_CLIENT_ID`, and
+`GITHUB_APP_CLIENT_SECRET` are not read, and nothing is installed. Like local
+mode it is loopback-only: `SERVER_HOST` must be `127.0.0.1`, `::1`, or
+`localhost`, and `APP_ORIGIN` an exact loopback origin on `PORT`.
+`SESSION_ENCRYPTION_KEY` is still required.
+
+The server runs `gh auth token --hostname github.com` (or the binary named by
+`CHOPIN_GH_PATH`) with its own environment, so gh's precedence applies: a
+`GH_TOKEN`, `GITHUB_TOKEN`, or `GH_CONFIG_DIR` in the server's environment
+decides which identity Chopin acts as. gh's output and errors are never logged or returned;
+the browser sees only fixed messages such as "GitHub CLI is not signed in; run
+`gh auth login`". gh is only the source of the token: Chopin still calls
+`api.github.com` with it directly. Only github.com is supported.
+
+The browser flow is one button:
+
+1. The signed-out page offers **Sign in with GitHub CLI**, which sends
+   `POST /auth/gh`. The request must carry an Origin equal to `APP_ORIGIN` and
+   a Host equal to its host, or it is refused with `403`.
+2. The server reads the gh token, checks identity and instance admission
+   exactly as a hosted sign-in does, and issues an ordinary browser session.
+   It replaces any session the same browser already holds. A failure answers
+   `{status: "failed", message}`, never `401`.
+3. `GET /api/session` reports `auth: "gh"` whether signed in or not. It never
+   signs anyone in by itself.
+
+The session is stored like a hosted one: the gh token is encrypted under
+`SESSION_ENCRYPTION_KEY` in PostgreSQL, so the browser cookie restores the
+login after a restart, and signing out deletes it. gh tokens do not expire, so
+Chopin keeps the token it read at sign-in and reads gh again only when GitHub
+rejects it with `401`. Then any open Planner sessions restart as for any
+credential rotation; a new token continues the login, while the same token or
+a different account ends it. A gh that is missing or fails at that moment
+reports a temporary `503` and keeps the login.
+
+Repository access is the token's own role on each repository, cached for 30
+seconds, rather than an App installation. A repository the token gets `403` or
+`404` for is treated as not accessible. The repository picker lists one
+synthetic installation covering everything the token's user owns,
+collaborates on, or reaches through an organization. **Manage repository
+access** and `/auth/github/install` open the GitHub CLI's OAuth app settings,
+where organization access for gh's token is requested and granted. The
+authorization-code and device-flow routes are not registered, so
+`/auth/github`, `/auth/github/callback`, `/auth/github/connector`, and
+`/auth/device*` return `404`.
+
+Know what this mode trusts before using it:
+
+- **Anyone who can reach the loopback port can sign in as your gh account.**
+  Another OS user on the machine, or any local process, can drive Chopin as
+  you; under `HARNESS=atomic` that includes the Planner's shell as the server's
+  user. The loopback bind and the Origin and Host checks stop remote and
+  DNS-rebinding access, not local users. Do not use it on a shared machine.
+- **The token is broader than an App's.** It carries whatever scopes the gh
+  login holds and reaches every repository you can, not a selected
+  installation. The Planner's GitHub MCP tools and Copilot receive it.
+- **Copilot needs a supported token.** `gh auth login` issues an OAuth `gho_`
+  token, which Copilot accepts. A gh configured with a classic PAT (`ghp_`) may
+  sign in but fail to run the Planner; use the normal gh login or a
+  fine-grained PAT with Copilot Requests. The account still needs a Copilot
+  entitlement.
+- **Organization policies apply.** Organizations with OAuth app access
+  restrictions or SAML SSO hide or refuse their repositories until the GitHub
+  CLI app is approved or the token is authorized for SSO.
+- **gh account changes are not observed live.** `gh auth switch` and
+  `gh auth logout` change nothing in Chopin until you sign out and in again,
+  and `gh auth logout` does not revoke the token on GitHub.
+- **Machines run non-durable**, as in local mode: a paired connector pushes
+  with its own `gh` or Git login and needs its owner signed in in a browser,
+  and machine-run Planner backends (`HARNESS=remote` through paired machines)
+  are unavailable. A client attached at `/api/v1/agent` with a GitHub bearer
+  still works.
+- **`/mcp` is unchanged.** Coding agents still present their own bearer;
+  `gh auth token` provides one.
+- **Rate limits** are the token's own: 5,000 requests an hour for an OAuth
+  token.
+- **The key keeps you signed in.** Keep `SESSION_ENCRYPTION_KEY` stable across
+  restarts, as the stored token is encrypted under it.
+
+`GITHUB_ALLOWED_USERS`, `GITHUB_ALLOWED_ORGANIZATIONS`, and `DEMO_PERSONAS`
+work as they do in local mode. The authentication mode does not change the
+Planner's tools.
 
 ## Instance admission
 
@@ -461,6 +548,16 @@ GET  /auth/device
 POST /auth/device/complete
 POST /auth/device/consent
 POST /auth/device/cancel
+```
+
+GitHub CLI mode (`AUTH_MODE=gh`) registers this route instead. It disables the
+authorization-code and device flows, so `/auth/github`, `/auth/github/callback`,
+`/auth/github/connector`, and `/auth/device*` return `404`;
+`/auth/github/install` redirects to the GitHub CLI's OAuth app settings, and
+`/auth/github/setup` keeps working:
+
+```text
+POST /auth/gh
 ```
 
 The repository-scoped document endpoint backs readable browser URLs. Existing
