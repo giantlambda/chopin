@@ -5,6 +5,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { acpCommand, AGENTS, nodeMajor, nodeOlder } from "@chopin/protocol/agents";
 import type { CodingAgent } from "@chopin/protocol/agents";
 import { checkAgent } from "./acp";
+import { acpPlannerCommand, plannerMcpProxy } from "./acp-planner";
 import type { AgentInfo } from "./acp";
 import { ConnectorStopped, redacted, serveWork } from "./connection";
 import { remote } from "./mcp";
@@ -887,6 +888,15 @@ const HELP = [
 	"  service status | restart | uninstall",
 	"      Show whether it is running, stopped, restart-pending or not-installed; restart it;",
 	"      or stop and remove it, keeping the pairing, config and runs.",
+	"  acp-planner [--document <document URL>] [--checkout <dir>] [--allow read|all] -- <command>",
+	"      Run a document's Planner in an ACP agent: attach to the document over the agent",
+	"      connection (the server runs HARNESS=remote) and run each Planner session in the agent,",
+	"      with Chopin's tools as its `chopin` MCP server. Run in a checkout of the document's",
+	"      repository with --document, it attaches with GH_TOKEN, GITHUB_TOKEN or `gh auth token`,",
+	"      and attaches again after a dropped connection. As a --planner-command of connect it",
+	"      takes the document and credential connect gives it, in the Planner's own worktree.",
+	"      --allow read (default) lets the agent read and search and use Chopin's tools without",
+	"      asking and declines everything else; --allow all allows every request.",
 	"  update [version] [--allow-downgrade] [--yes]",
 	"      Replace this chopin with a verified release: by default the one your Chopin instance",
 	"      recommends, or else the newest. An older release needs --allow-downgrade; --yes skips",
@@ -905,7 +915,14 @@ if (import.meta.main) {
 	await removeReplaced();
 	try {
 		if (mode === "bridge") await bridge();
-		else if (mode === "update") {
+		else if (mode === "acp-planner-mcp") await plannerMcpProxy();
+		else if (mode === "acp-planner") {
+			await acpPlannerCommand(args, {
+				server: chosenServer,
+				origin,
+				usage: text => new UsageError(text),
+			});
+		} else if (mode === "update") {
 			let parsed = parseArgs(args, { flags: ["allow-downgrade", "yes"] });
 			if (parsed.positional.length > 1 || parsed.rest) {
 				throw new Error(`Usage: ${SELF} update [version] [--allow-downgrade] [--yes]`);

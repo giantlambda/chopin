@@ -485,6 +485,54 @@ choose it for.
 In the **Machine** list, a machine started without `--planner-command` is
 greyed out.
 
+## Run a Planner in an ACP agent
+
+`chopin acp-planner` runs a document's Planner in any coding agent that speaks
+ACP, such as Copilot CLI or Atomic. The server must run `HARNESS=remote`. Run it
+in a checkout of the document's repository and name the document:
+
+```sh
+cd ~/src/score
+CHOPIN_URL=https://your-chopin-instance.example chopin acp-planner \
+  --document https://your-chopin-instance.example/octo-org/score/plan -- copilot --acp
+```
+
+It attaches with `GH_TOKEN`, else `GITHUB_TOKEN`, else the token of your `gh`
+login, which must be able to push to the repository. Sign in to Chopin in a
+browser as the same account first: Chopin's tools act with that sign-in. It
+attaches again after a dropped connection, and Ctrl-C detaches. It stops when
+Chopin closes the connection for another reason, saying why, such as the
+sign-in ending or someone resetting the document's Planner.
+
+It also works as a [Planner command](#run-a-planner-on-this-machine), where it
+takes the document and credential `chopin connect` gives it:
+
+```sh
+chopin connect --planner-command "chopin acp-planner -- copilot --acp" --agent copilot
+```
+
+The agent then works in the Planner's own worktree,
+`planners/<owner>/<repo>/<document id>`, detached at your checkout's commit and
+moved to it again at each start while it has no changes.
+
+Each Planner session Chopin starts gets its own agent, started on the session's
+first turn; that includes the short background sessions that draft a
+document's title. The agent finds Chopin's tools, such as `read_plan` and
+`edit_plan`, as its `chopin` MCP server. That server is served on loopback with
+a token of its own, or through `chopin acp-planner-mcp` over stdio for an agent
+that takes no HTTP servers. A tool Chopin did not offer in the current turn
+fails without reaching Chopin. ACP has no system prompt, so the Planner's
+instructions go with the first prompt, and again whenever they change. The
+agent's replies and thoughts stream to Chat; its own tool calls, such as reading
+files, are not reported there.
+
+The agent runs on your machine as you, with its own tools. Chopin's permission
+checks cover only Chopin's tools. With `--allow read`, the default, the agent's
+requests to read, search or fetch, and to use Chopin's tools, are allowed
+without asking, and every other request, such as running a command or editing a
+file, is declined. `--allow all` allows every request; an agent's own flag, such
+as `--allow-all`, does the same inside the agent.
+
 ## Where things live on this machine
 
 `chopin connect` keeps its files in its base dir,
@@ -564,6 +612,8 @@ pairs again. To remove the service as well, run `chopin service uninstall`.
 | `chopin service status`                                     | Prints `running`, `stopped`, `restart-pending` or `not-installed`.                                                |
 | `chopin service restart`                                    | Restarts the service with the settings it has, for example after an update.                                       |
 | `chopin service uninstall`                                  | Removes the service. The pairing, settings and past runs stay.                                                    |
+| `chopin acp-planner --document <URL> -- <command>`          | Runs the document's Planner in an ACP agent, attached with your own GitHub token.                                 |
+| `chopin acp-planner … --allow all`                          | Allows every permission request the agent makes, not only reads and Chopin's tools.                               |
 | `chopin update [version] [--allow-downgrade] [--yes]`       | Installs the release your server asks for, or the one you name.                                                   |
 | `chopin unpair`                                             | Revokes this machine in Chopin and deletes its token.                                                             |
 

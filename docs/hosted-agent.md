@@ -394,6 +394,8 @@ document over the agent connection, usually an agent on a member's own machine. 
 client keeps its code, model credentials, and its own tools. The adapter
 (`apps/server/src/harness/remote`) forwards each Planner session as `start` and
 each turn as `turn`, and re-emits the parts the client streams back.
+`chopin acp-planner` is such a client for any ACP coding agent; see
+[Run a Planner in an ACP agent](chopin-cli.md#run-a-planner-in-an-acp-agent).
 
 The agent connection is a WebSocket at `/api/v1/agent`, on the application's own
 origin, with the `chopin.agent.v1` subprotocol.

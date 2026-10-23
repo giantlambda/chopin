@@ -784,6 +784,10 @@ to the connector's a line at a time, with its credential, your `--env` values
 and anything that looks like a token replaced with `[redacted]`; a line too
 long to mask is left out, with a note in its place.
 
+`chopin acp-planner -- <ACP agent command>` is a ready-made backend: it runs each
+Planner session in an ACP agent, with the turn's host tools as the agent's MCP
+server. See [Run a Planner in an ACP agent](chopin-cli.md#run-a-planner-in-an-acp-agent).
+
 ### Environment
 
 Each launch gets the connector's environment, your `--env` values, and these:

@@ -5,6 +5,9 @@
  * one against a database of its own, created beside local-auth's.
  */
 import { spawn } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { SQL } from "bun";
 
@@ -77,7 +80,14 @@ let processes: ReturnType<typeof spawn>[] = [];
 test.describe.configure({ mode: "default" });
 
 async function remoteServer(database: string) {
-	let child = spawn(process.execPath, ["--preload", "./e2e/github.ts", "apps/server/src/main.ts"], {
+	// The fake TypeSafe judge clears a Planner's Chat reply, as it does on the other e2e servers.
+	let child = spawn(process.execPath, [
+		"--preload",
+		"./e2e/github.ts",
+		"--preload",
+		"./e2e/jev.ts",
+		"apps/server/src/main.ts",
+	], {
 		cwd: ROOT,
 		detached: true,
 		env: {
@@ -434,4 +444,64 @@ test("Chat says nothing about attachments where the Planner runs on the server",
 	await ready(page);
 	await expect(page.getByRole("combobox", { name: "Message" })).toBeVisible();
 	await expect(plannerStatus(page)).toHaveCount(0);
+});
+
+test("an ACP agent run by chopin acp-planner edits the document with Chopin's tools", async ({ page }) => {
+	test.setTimeout(120_000);
+	let database = await freshDatabase();
+	await migrate(database);
+	await remoteServer(database);
+	registerTestDatabase(PORT, database);
+	let room = crypto.randomUUID();
+	await createChannel(PORT, room);
+	await seedChannel(PORT, room, "# Strings\nThe harp needs new strings.\n");
+	await authenticate(page, HANDLE, ORIGIN);
+	await page.setViewportSize({ width: 1440, height: 1000 });
+	await page.goto(`${ORIGIN}${roomPath(room)}`);
+	await ready(page);
+
+	// The bridge as a person runs it in a checkout: it attaches with their own GitHub token.
+	let work = mkdtempSync(join(tmpdir(), "acp-planner-e2e-"));
+	let log = join(work, "agent.log");
+	writeFileSync(log, "");
+	let output = "";
+	let planner = spawn(process.execPath, [
+		join(ROOT, "apps/connector/src/main.ts"),
+		"acp-planner",
+		"--document",
+		room,
+		"--checkout",
+		work,
+		"--",
+		process.execPath,
+		join(ROOT, "apps/connector/src/testing/fake-planner-agent.ts"),
+	], {
+		cwd: work,
+		detached: true,
+		env: {
+			...process.env,
+			CHOPIN_URL: ORIGIN,
+			CHOPIN_HOME: work,
+			GH_TOKEN: `ghu_e2e_${HANDLE}_1`,
+			FAKE_PLANNER_LOG: log,
+		},
+		stdio: ["ignore", "ignore", "pipe"],
+	});
+	planner.stderr?.on("data", chunk => {
+		output += String(chunk);
+	});
+	processes.push(planner);
+	try {
+		await expect(plannerStatus(page), output).toHaveText(`Planner: ${HANDLE} attached`);
+		let input = chatInput(page);
+		await fillChat(input, "@chopin use the tools and edit");
+		await input.press("Enter");
+
+		// The agent read the document and inserted a paragraph through Chopin's own tools.
+		await expect(content(page)).toContainText("Added by the ACP Planner.");
+		await expect(content(page)).toContainText("The harp needs new strings.");
+		await expect(page.getByText(/^listed .*\bedit_plan\b/)).toBeVisible();
+	} finally {
+		rmSync(work, { recursive: true, force: true });
+	}
 });

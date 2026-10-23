@@ -53,7 +53,7 @@ export type AgentFailure = { how: string; stderr?: string };
  * closes when the agent exits. `failure` says how one that failed to start ended, and `stop`
  * stops it and everything it started, resolving once they are gone.
  */
-function startAgent(
+export function startAgent(
 	app: ClientApp,
 	command: string[],
 	cwd: string,
@@ -118,7 +118,7 @@ function startAgent(
 	};
 }
 
-function initialize(connection: ReturnType<ClientApp["connect"]>) {
+export function initialize(connection: ReturnType<ClientApp["connect"]>) {
 	return connection.agent.request("initialize", {
 		protocolVersion: PROTOCOL_VERSION,
 		clientInfo: { name: "chopin", version: VERSION },
