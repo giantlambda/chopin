@@ -41,6 +41,7 @@ export function AddProjectDialog(
 		readRepositoryCache(userId)
 	);
 	let [error, setError] = useState<unknown>();
+	let [loading, setLoading] = useState(false);
 	let [query, setQuery] = useState("");
 	let [retry, setRetry] = useState(0);
 	let [adding, setAdding] = useState<string>();
@@ -51,7 +52,9 @@ export function AddProjectDialog(
 		let cached = readRepositoryCache(userId);
 		if (cached) setSnapshot(cached);
 		setError(undefined);
-		if (retry === 0 && cached && !repositoryCacheIsStale(cached)) return;
+		let fresh = retry === 0 && cached && !repositoryCacheIsStale(cached);
+		setLoading(!fresh);
+		if (fresh) return;
 		loadRepositorySnapshot(userId, cached, value => {
 			if (active) setSnapshot(value);
 		}).then(value => {
@@ -61,6 +64,8 @@ export function AddProjectDialog(
 			}
 		}, reason => {
 			if (active) setError(reason);
+		}).finally(() => {
+			if (active) setLoading(false);
 		});
 		return () => {
 			active = false;
@@ -109,8 +114,8 @@ export function AddProjectDialog(
 					value={query}
 				/>
 			</div>
-			<div className="navigation-palette-list" aria-busy={!snapshot && error === undefined}>
-				{!snapshot && error === undefined && (
+			<div className="navigation-palette-list" aria-busy={loading}>
+				{loading && error === undefined && visible.length === 0 && (
 					<p className="navigation-palette-status" role="status">
 						<LoaderIcon aria-hidden="true" data-palette-loader="" />
 						Loading repositories
@@ -128,7 +133,7 @@ export function AddProjectDialog(
 						</button>
 					</div>
 				)}
-				{snapshot && visible.length === 0 && error === undefined && (
+				{snapshot && !loading && visible.length === 0 && error === undefined && (
 					normalized || repositories.length > 0
 						? (
 							<p className="navigation-palette-status" role="status">
