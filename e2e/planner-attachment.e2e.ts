@@ -490,9 +490,8 @@ test("an ACP agent run by chopin acp-planner edits the document with Chopin's to
 	planner.stderr?.on("data", chunk => {
 		output += String(chunk);
 	});
-	processes.push(planner);
 	try {
-		await expect(plannerStatus(page), output).toHaveText(`Planner: ${HANDLE} attached`);
+		await expect(plannerStatus(page)).toHaveText(`Planner: ${HANDLE} attached`);
 		let input = chatInput(page);
 		await fillChat(input, "@chopin use the tools and edit");
 		await input.press("Enter");
@@ -502,6 +501,13 @@ test("an ACP agent run by chopin acp-planner edits the document with Chopin's to
 		await expect(content(page)).toContainText("The harp needs new strings.");
 		await expect(page.getByText(/^listed .*\bedit_plan\b/)).toBeVisible();
 	} finally {
+		// It detaches and stops its agent on SIGTERM; only then can its checkout go.
+		if (planner.exitCode === null && planner.signalCode === null && planner.pid) {
+			let exit = new Promise(resolve => planner.once("close", resolve));
+			process.kill(-planner.pid, "SIGTERM");
+			await exit;
+		}
+		await test.info().attach("acp-planner output", { body: output });
 		rmSync(work, { recursive: true, force: true });
 	}
 });

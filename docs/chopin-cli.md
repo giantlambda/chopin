@@ -513,25 +513,37 @@ chopin connect --planner-command "chopin acp-planner -- copilot --acp" --agent c
 
 The agent then works in the Planner's own worktree,
 `planners/<owner>/<repo>/<document id>`, detached at your checkout's commit and
-moved to it again at each start while it has no changes.
+moved to it again at each start while it has no changes. When git can't add
+that worktree, it says so and works in your checkout.
 
 Each Planner session Chopin starts gets its own agent, started on the session's
 first turn; that includes the short background sessions that draft a
 document's title. The agent finds Chopin's tools, such as `read_plan` and
 `edit_plan`, as its `chopin` MCP server. That server is served on loopback with
 a token of its own, or through `chopin acp-planner-mcp` over stdio for an agent
-that takes no HTTP servers. A tool Chopin did not offer in the current turn
-fails without reaching Chopin. ACP has no system prompt, so the Planner's
+that takes no HTTP servers. A tool Chopin did not offer in the current turn,
+or a call that comes after its turn ended, fails without reaching Chopin. An
+agent that lists its tools once misses a tool Chopin first offers in a later
+turn. ACP has no system prompt, so the Planner's
 instructions go with the first prompt, and again whenever they change. The
 agent's replies and thoughts stream to Chat; its own tool calls, such as reading
 files, are not reported there.
 
-The agent runs on your machine as you, with its own tools. Chopin's permission
-checks cover only Chopin's tools. With `--allow read`, the default, the agent's
-requests to read, search or fetch, and to use Chopin's tools, are allowed
-without asking, and every other request, such as running a command or editing a
-file, is declined. `--allow all` allows every request; an agent's own flag, such
-as `--allow-all`, does the same inside the agent.
+The agent runs on your machine as you, with its own tools, and its environment
+holds yours, `GH_TOKEN` and `GITHUB_TOKEN` included; only the Planner credential
+`chopin connect` hands over is kept from it. Chopin's permission checks cover
+only Chopin's tools. With `--allow read`, the default, the agent may use the
+current turn's Chopin tools, and read and search files inside its working
+directory, without asking. Every other request is declined, such as running a
+command, editing a file, fetching a URL, or reading outside the working
+directory. `--allow all` allows every request; an agent's own flag, such as
+`--allow-all`, does the same inside the agent. A background session works in an
+empty temporary folder and may use only Chopin's tools, whatever `--allow` says.
+
+A declined request gets the agent's reject option. With `--decline cancel` it is
+cancelled instead, which suits an agent that then asks a person, such as
+`herdr-acp --unanswered herdr`. When Chopin stops a turn, an agent that doesn't
+stop within 10 seconds is stopped.
 
 ## Where things live on this machine
 
@@ -613,7 +625,8 @@ pairs again. To remove the service as well, run `chopin service uninstall`.
 | `chopin service restart`                                    | Restarts the service with the settings it has, for example after an update.                                       |
 | `chopin service uninstall`                                  | Removes the service. The pairing, settings and past runs stay.                                                    |
 | `chopin acp-planner --document <URL> -- <command>`          | Runs the document's Planner in an ACP agent, attached with your own GitHub token.                                 |
-| `chopin acp-planner … --allow all`                          | Allows every permission request the agent makes, not only reads and Chopin's tools.                               |
+| `chopin acp-planner … --allow all`                          | Allows every permission request the agent makes, not only Chopin's tools and reads in its working directory.      |
+| `chopin acp-planner … --decline cancel`                     | Cancels the requests it declines instead of rejecting them, for an agent that then asks a person.                 |
 | `chopin update [version] [--allow-downgrade] [--yes]`       | Installs the release your server asks for, or the one you name.                                                   |
 | `chopin unpair`                                             | Revokes this machine in Chopin and deletes its token.                                                             |
 

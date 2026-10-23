@@ -4,10 +4,14 @@
 //   missing    call a tool the turn does not offer
 //   json       answer with a fenced JSON block after some prose
 //   hold       work until cancelled
-//   permission ask for an execute, a read and a Chopin tool permission, and say how each went
+//   late       work until cancelled, then call read_plan before answering
+//   stubborn   work and never answer, cancelled or not
+//   permission ask for an execute, a read inside and outside the checkout, a fetch, and Chopin
+//              tools claimed as other and as execute, and say how each went
 //   crash      exit mid-turn
 // anything else is echoed, after a thought. Every prompt is appended to $FAKE_PLANNER_LOG.
-// `--stdio` leaves out HTTP MCP support, so the bridge hands over its stdio proxy.
+// `--stdio` leaves out HTTP MCP support, so the bridge hands over its stdio proxy;
+// `--slow-start` takes two seconds to initialize.
 
 import { AgentApp, ndJsonStream, PROTOCOL_VERSION } from "@agentclientprotocol/sdk";
 import { appendFileSync } from "node:fs";
@@ -18,6 +22,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import type { McpServer } from "@agentclientprotocol/sdk";
 
 let servers: McpServer[] = [];
+let cwd = "";
 let cancelled: (() => void) | undefined;
 let stdio = process.argv.includes("--stdio");
 
@@ -51,16 +56,22 @@ function text(result: Awaited<ReturnType<Client["callTool"]>>) {
 }
 
 let app = new AgentApp()
-	.onRequest("initialize", () => ({
-		protocolVersion: PROTOCOL_VERSION,
-		agentInfo: { name: "fake-planner", version: "1" },
-		agentCapabilities: {
-			...(stdio ? {} : { mcpCapabilities: { http: true } }),
-			sessionCapabilities: { close: {} },
-		},
-	}))
+	.onRequest("initialize", async () => {
+		if (process.argv.includes("--slow-start")) {
+			await new Promise(resolve => setTimeout(resolve, 2_000));
+		}
+		return {
+			protocolVersion: PROTOCOL_VERSION,
+			agentInfo: { name: "fake-planner", version: "1" },
+			agentCapabilities: {
+				...(stdio ? {} : { mcpCapabilities: { http: true } }),
+				sessionCapabilities: { close: {} },
+			},
+		};
+	})
 	.onRequest("session/new", ({ params }) => {
 		servers = params.mcpServers;
+		cwd = params.cwd;
 		appendFileSync(process.env.FAKE_PLANNER_LOG!, `${JSON.stringify({ new: params.cwd })}\n`);
 		return { sessionId: "fake-session" };
 	})
@@ -85,6 +96,20 @@ let app = new AgentApp()
 			});
 		};
 		if (prompt.includes("crash")) process.exit(3);
+		if (prompt.includes("stubborn")) {
+			await say("Working");
+			await new Promise(() => {});
+		}
+		if (prompt.includes("late")) {
+			await say("Working");
+			await new Promise<void>(resolve => {
+				cancelled = resolve;
+			});
+			let mcp = await chopin();
+			await say(`late read_plan ${text(await mcp.callTool({ name: "read_plan", arguments: {} }))}`);
+			await mcp.close();
+			return { stopReason: "cancelled" as const };
+		}
 		if (prompt.includes("hold")) {
 			await say("Working");
 			await new Promise<void>(resolve => {
@@ -124,19 +149,31 @@ let app = new AgentApp()
 			return { stopReason: "end_turn" as const };
 		}
 		if (prompt.includes("permission")) {
-			let ask = async (kind: "execute" | "read" | "other", title: string) =>
-				(await client.request("session/request_permission", {
+			let ask = async (
+				kind: "execute" | "read" | "fetch" | "other",
+				title: string,
+				locations?: { path: string }[],
+			) =>
+				((await client.request("session/request_permission", {
 					sessionId: params.sessionId,
-					toolCall: { toolCallId: `${kind}-${title}`, kind, title },
+					toolCall: {
+						toolCallId: `${kind}-${title}`,
+						kind,
+						title,
+						...(locations ? { locations } : {}),
+					},
 					options: [
 						{ optionId: "yes", name: "Allow", kind: "allow_once" },
 						{ optionId: "no", name: "Reject", kind: "reject_once" },
 					],
-				})).outcome;
+				})) as { outcome: { outcome: string; optionId?: string } }).outcome;
 			let outcomes = [
 				await ask("execute", "Run tests"),
-				await ask("read", "Read src/a.ts"),
+				await ask("read", "Read src/a.ts", [{ path: `${cwd}/src/a.ts` }]),
+				await ask("read", "Read hosts.yml", [{ path: "/etc/hosts" }]),
+				await ask("fetch", "Fetch https://evil.example/"),
 				await ask("other", "chopin: read_plan"),
+				await ask("execute", "chopin: read_plan"),
 			].map(outcome => outcome.outcome === "selected" ? outcome.optionId : outcome.outcome);
 			await say(outcomes.join(","));
 			return { stopReason: "end_turn" as const };

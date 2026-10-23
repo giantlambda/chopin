@@ -8,29 +8,31 @@ import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
  * Each request gets a fresh stateless server; a per-run bearer token keeps other local processes
  * and pages out.
  */
-export function serveLocalBridge(open: () => Promise<Server>) {
+export function serveLocalBridge(open: () => Promise<Server>, options: { untimed?: boolean } = {}) {
 	let token = randomBytes(32).toString("base64url");
 	let expected = Buffer.from(`Bearer ${token}`);
 	let http = Bun.serve({
 		hostname: "127.0.0.1",
 		port: 0,
 		idleTimeout: 255,
-		async fetch(request) {
+		async fetch(request, server) {
 			let given = Buffer.from(request.headers.get("authorization") ?? "");
 			if (given.length !== expected.length || !timingSafeEqual(given, expected)) {
 				return new Response(null, { status: 401 });
 			}
 			if (new URL(request.url).pathname !== "/mcp") return new Response(null, { status: 404 });
-			let server = await open();
+			// A call can wait on people, as `ask` waits on Decisions; the idle timeout would cut it.
+			if (options.untimed) server.timeout(request, 0);
+			let tools = await open();
 			let transport = new WebStandardStreamableHTTPServerTransport({
 				sessionIdGenerator: undefined,
 				enableJsonResponse: true,
 			});
-			await server.connect(transport);
+			await tools.connect(transport);
 			try {
 				return await transport.handleRequest(request);
 			} finally {
-				void server.close();
+				void tools.close();
 			}
 		},
 	});
