@@ -1,6 +1,12 @@
 import { describe, expect, it } from "bun:test";
 
-import { GitHubClient, GitHubError, GitHubTokenError } from "./client";
+import {
+	GH_CLI_APP_SETTINGS,
+	GitHubClient,
+	GitHubError,
+	GitHubTokenClient,
+	GitHubTokenError,
+} from "./client";
 
 function repository(id: string) {
 	return {
@@ -33,6 +39,21 @@ function installation(id = 123) {
 			statuses: "read",
 		},
 	};
+}
+
+function api(respond: (url: URL, headers: Headers) => Response, clock?: () => number) {
+	let requests: Array<{ url: URL; headers: Headers }> = [];
+	let options = {
+		fetch: async (input: string | URL | Request, init?: RequestInit) => {
+			let url = new URL(String(input));
+			let headers = new Headers(init?.headers);
+			requests.push({ url, headers });
+			return respond(url, headers);
+		},
+		endpoints: { api: "https://api.test" },
+		...(clock ? { clock } : {}),
+	};
+	return { requests, options };
 }
 
 describe("the GitHub client", () => {
@@ -657,6 +678,155 @@ describe("the GitHub client", () => {
 			});
 			expect(await github.installedRepository("t", "octo-org", "elsewhere")).toBeUndefined();
 			expect(await github.installedRepository("t", "someone-else", "score")).toBeUndefined();
+		});
+	});
+
+	describe("user repositories and the token-scoped client", () => {
+		it("lists the user's repositories page by page with ETag revalidation", async () => {
+			let { requests, options } = api((url, headers) => {
+				if (headers.get("if-none-match") === '"repos"') {
+					return new Response(null, { status: 304, headers: { etag: '"repos"' } });
+				}
+				return Response.json([repository("R_score")], {
+					headers: {
+						etag: '"repos"',
+						link: url.searchParams.get("page") === "1"
+							? '<https://api.test/user/repos?page=2&per_page=100>; rel="next"'
+							: '<https://api.test/user/installations/1/repositories?page=9>; rel="next"',
+					},
+				});
+			});
+			let client = new GitHubClient(options);
+
+			let first = await client.userRepositories("gho_cli", 1);
+			expect(first.repositories.map(item => item.fullName)).toEqual(["octo-org/score"]);
+			expect(first.nextPage).toBe(2);
+			let query = requests[0]!.url.searchParams;
+			expect(requests[0]!.url.pathname).toBe("/user/repos");
+			expect(query.get("per_page")).toBe("100");
+			expect(query.get("page")).toBe("1");
+			expect(query.get("sort")).toBe("full_name");
+			expect(query.get("affiliation")).toBe("owner,collaborator,organization_member");
+			expect(requests[0]!.headers.get("authorization")).toBe("Bearer gho_cli");
+			// A next link to another listing is not followed.
+			expect((await client.userRepositories("gho_cli", 2)).nextPage).toBeUndefined();
+
+			let conditional = await client.userRepositories("gho_cli", 1, {});
+			expect(conditional).toMatchObject({ etag: '"repos"' });
+			expect(await client.userRepositories("gho_cli", 1, { ifNoneMatch: '"repos"' }))
+				.toEqual({ notModified: true, etag: '"repos"' });
+		});
+
+		it("rejects a malformed repository list", async () => {
+			let { options } = api(() => Response.json({ repositories: [] }));
+			await expect(new GitHubClient(options).userRepositories("gho_cli", 1))
+				.rejects.toThrow("invalid repository list");
+		});
+
+		it("stands one synthetic installation for everything the token reaches", async () => {
+			let { requests, options } = api(url =>
+				url.pathname === "/user"
+					? Response.json({ node_id: "U_octocat", login: "octocat", avatar_url: "avatar" })
+					: Response.json([repository("R_score")])
+			);
+			let client = new GitHubTokenClient(options);
+
+			let installations = await client.installations("gho_cli", 1, {});
+			expect(installations).toEqual({
+				installations: [{
+					id: "0",
+					account: { login: "octocat", avatarUrl: "avatar", type: "user" },
+					repositorySelection: "all",
+					configureUrl: GH_CLI_APP_SETTINGS,
+					suspended: false,
+					permissions: {
+						contents: true,
+						pullRequests: true,
+						checks: true,
+						statuses: true,
+						issues: true,
+					},
+					writable: { contents: true, pullRequests: true },
+				}],
+				nextPage: undefined,
+			});
+			expect(await client.installations("gho_cli", 2)).toEqual({
+				installations: [],
+				nextPage: undefined,
+			});
+			let page = await client.installationRepositories("gho_cli", "0", 1);
+			expect(page.repositories.map(item => item.id)).toEqual(["R_score"]);
+			expect(requests.at(-1)!.url.pathname).toBe("/user/repos");
+			await expect(client.installationRepositories("gho_cli", "123", 1)).rejects.toMatchObject({
+				status: 404,
+			});
+			expect(requests.map(request => request.url.pathname)).toEqual(["/user", "/user/repos"]);
+		});
+
+		it("grants repository access from the token's own role, cached briefly", async () => {
+			let now = 0;
+			let statuses = new Map<string, number>([
+				["/repos/octo-org/hidden", 403],
+				["/repos/octo-org/missing", 404],
+				["/repos/octo-org/expired", 401],
+				["/repos/octo-org/busy", 429],
+			]);
+			let { requests, options } = api(url => {
+				let status = statuses.get(url.pathname);
+				return status
+					? Response.json({ message: "denied" }, { status })
+					: Response.json(repository("R_score"));
+			}, () => now);
+			let client = new GitHubTokenClient(options);
+
+			expect((await client.repositoryAccess("gho_cli", "Octo-Org", "Score"))?.id).toBe("R_score");
+			expect((await client.repositoryAccess("gho_cli", "octo-org", "score"))?.id).toBe("R_score");
+			expect(requests).toHaveLength(1);
+			expect(await client.installedRepository("gho_cli", "octo-org", "score")).toMatchObject({
+				repository: { id: "R_score", permissions: { push: true } },
+				installation: {
+					id: "0",
+					suspended: false,
+					permissions: { pullRequests: true, issues: true },
+					writable: { contents: true, pullRequests: true },
+				},
+			});
+			expect(requests).toHaveLength(1);
+
+			now = 30_001;
+			await client.repositoryAccess("gho_cli", "octo-org", "score");
+			expect(requests).toHaveLength(2);
+			client.invalidate("gho_cli");
+			await client.repositoryAccess("gho_cli", "octo-org", "score");
+			expect(requests).toHaveLength(3);
+			await client.repositoryAccess("gho_other", "octo-org", "score");
+			expect(requests).toHaveLength(4);
+
+			expect(await client.repositoryAccess("gho_cli", "octo-org", "hidden")).toBeUndefined();
+			expect(await client.repositoryAccess("gho_cli", "octo-org", "missing")).toBeUndefined();
+			expect(await client.installedRepository("gho_cli", "octo-org", "missing")).toBeUndefined();
+			for (let [name, status] of [["expired", 401], ["busy", 429]] as const) {
+				let before = requests.length;
+				await expect(client.repositoryAccess("gho_cli", "octo-org", name)).rejects.toMatchObject({
+					status,
+				});
+				// A failed lookup is asked again rather than remembered.
+				await expect(client.repositoryAccess("gho_cli", "octo-org", name)).rejects.toMatchObject({
+					status,
+				});
+				expect(requests.length).toBe(before + 2);
+			}
+		});
+
+		it("leaves the App client's installation-gated access unchanged", async () => {
+			let { requests, options } = api(url =>
+				url.pathname === "/user/installations"
+					? Response.json({ installations: [] })
+					: Response.json(repository("R_score"))
+			);
+			expect(await new GitHubClient(options).repositoryAccess("ghu_user", "octo-org", "score"))
+				.toBeUndefined();
+			expect(requests.map(request => request.url.pathname)).toEqual(["/user/installations"]);
 		});
 	});
 });

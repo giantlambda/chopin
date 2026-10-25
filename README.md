@@ -169,6 +169,9 @@ bun run dev
 The committed local Compose override publishes PostgreSQL on host port 5432, so
 use it only on a trusted development machine. See [Self-hosting](docs/self-hosting.md) for an internet-facing deployment.
 
+To try Chopin without registering a GitHub App, [run it on your GitHub CLI login](docs/self-hosting.md#run-on-your-github-cli-login)
+with `AUTH_MODE=gh` instead.
+
 1. Open [http://127.0.0.1:8787](http://127.0.0.1:8787) and sign in.
 2. Install or update the GitHub App when the repository picker asks.
 3. Select a repository and create a channel, then start writing. The current

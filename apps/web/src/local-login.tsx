@@ -1,6 +1,7 @@
 import { useEffect, useReducer, useRef } from "react";
 
 import * as DeviceAuthorization from "./device-authorization";
+import { GhLogin } from "./gh-login";
 import { LocalLoginView } from "./local-login-view";
 import { copyAndOpen, localSignInReducer } from "./local-sign-in";
 
@@ -45,6 +46,11 @@ function statusEvent(
  * Wires the pure local sign-in reducer to the device-flow API, the browser
  * poll timer, and clipboard/tab access. Rendering lives in `LocalLoginView`.
  */
+/** The loopback modes' sign-in pages share one lazily loaded chunk. */
+export function LoopbackLogin({ auth }: { auth: "local" | "gh" }) {
+	return auth === "gh" ? <GhLogin /> : <LocalLogin />;
+}
+
 export function LocalLogin() {
 	let [state, dispatch] = useReducer(localSignInReducer, { status: "idle" });
 	let pollTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);

@@ -36,7 +36,8 @@ type Options = {
 	/** The deployment's SESSION_ENCRYPTION_KEY; without it machines hold no GitHub credentials. */
 	key?: Uint8Array;
 	origin: string;
-	clientId: string;
+	/** Binds stored credentials, so it is read only with `key`. */
+	clientId?: string;
 	refresh?: (refreshToken: string) => Promise<GitHubTokenGrant>;
 	/** Whether the owner is still admitted, as a browser session is rechecked. */
 	authorize?: (userId: string, accessToken: string) => Promise<boolean>;

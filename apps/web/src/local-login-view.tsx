@@ -128,7 +128,7 @@ const TONE_ICONS = {
  * callouts are: neutral for progress and cancellation, warning for anything
  * the user must act on, danger for failure, success for completion.
  */
-function StatusBanner(
+export function StatusBanner(
 	{ children, icon, role, title, titleId, tone }: {
 		children: ReactNode;
 		icon?: ReactNode;

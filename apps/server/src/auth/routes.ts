@@ -1,4 +1,10 @@
-import { GitHubClient, GitHubError } from "../github/client";
+import {
+	GH_CLI_APP_SETTINGS,
+	GitHubClient,
+	GitHubError,
+	GitHubTokenClient,
+	GitHubTokenError,
+} from "../github/client";
 import { StorageError } from "../storage/errors";
 import { demoRoster } from "../demo/roster";
 import { Admission, AdmissionDenied } from "./admission";
@@ -7,6 +13,7 @@ import { Machines } from "./machines";
 import { DeviceAuthorization } from "./device";
 import { LocalAuth } from "./local";
 import { LocalCredentials } from "./local-store";
+import { ghToken, GhUnavailable } from "./gh";
 import { MACHINES_PATH } from "../http/machines-path";
 
 import type { SetupAgent } from "@chopin/protocol/agents";
@@ -21,6 +28,7 @@ const RETURN_PATH_MAX_LENGTH = 2_048;
 const RESERVED_RETURN_PATHS = ["/api", "/auth", "/ws", "/mcp"];
 /** The OAuth attempt's pairing when it authorizes pairing keys rather than one pairing's machine. */
 const KEY_ATTEMPT = "key";
+const GH_GRANT_SECONDS = 31 * 24 * 60 * 60;
 
 type Dependencies = {
 	config: AuthConfig;
@@ -33,6 +41,8 @@ type Dependencies = {
 	setupAgents?: SetupAgent[];
 	device?: DeviceAuthorization;
 	credentials?: LocalCredentials;
+	/** AUTH_MODE=gh: reads the operator's GitHub CLI token. */
+	ghToken?: () => Promise<string>;
 	delay?: (ms: number, signal: AbortSignal) => Promise<void>;
 	onSessionRevoked?: (sessionId: string) => Promise<void>;
 	onCredentialsWillRotate?: (sessionId: string, revision: number) => Promise<void>;
@@ -120,6 +130,20 @@ function failure(err: unknown): Response {
 	return json({ error: "request failed" }, 500);
 }
 
+/**
+ * A gh token never expires, so its grant outlives the 30-day session: only a GitHub 401 re-reads
+ * gh, since a proactive refresh would restart open Planner sessions. The active owner's timer
+ * clamps near 24.8 days, so a binding held that long re-resolves on its next turn.
+ */
+function ghGrant(token: string): GitHubTokenGrant {
+	return {
+		accessToken: token,
+		accessExpiresIn: GH_GRANT_SECONDS,
+		refreshToken: token,
+		refreshExpiresIn: GH_GRANT_SECONDS,
+	};
+}
+
 function page(url: URL): number | undefined {
 	let values = url.searchParams.getAll("page");
 	if (values.length === 0) return 1;
@@ -174,22 +198,40 @@ export function registerAuthRoutes(
 	let clock = dependencies.clock ?? (() => new Date());
 	let config = dependencies.config;
 	let storage = dependencies.storage;
-	let github = dependencies.github ?? new GitHubClient();
+	let github = dependencies.github ?? (config.gh ? new GitHubTokenClient() : new GitHubClient());
 	let admission = new Admission(config, github, () => clock().getTime());
 	let secure = new URL(config.origin).protocol === "https:";
 	let local: LocalAuth | undefined;
+	let readGhToken = config.gh
+		? dependencies.ghToken ?? ghToken({ command: config.gh.command, host: "github.com" })
+		: undefined;
+	let refresh = (refreshToken: string) =>
+		github.refresh({
+			clientId: config.clientId!,
+			...(config.clientSecret && !config.local ? { clientSecret: config.clientSecret } : {}),
+			refreshToken,
+		});
 	let sessions = new Sessions(storage, secure, clock, {
 		persistence: config.local ? undefined : {
 			key: config.encryptionKey,
 			origin: config.origin,
-			clientId: config.clientId,
+			clientId: config.gh ? "gh" : config.clientId!,
 		},
-		refresh: refreshToken =>
-			github.refresh({
-				clientId: config.clientId,
-				...(config.clientSecret && !config.local ? { clientSecret: config.clientSecret } : {}),
-				refreshToken,
-			}),
+		refresh: readGhToken
+			? async previous => {
+				let next: string;
+				try {
+					next = await readGhToken();
+				} catch (err) {
+					if (err instanceof GhUnavailable) throw new GitHubTokenError(err.message, 503);
+					throw err;
+				}
+				if (next === previous) {
+					throw new GitHubTokenError("GitHub CLI token was rejected", 401, true);
+				}
+				return ghGrant(next);
+			}
+			: refresh,
 		beforeRefresh: dependencies.onCredentialsWillRotate,
 		// Signing out, expiring, or losing admission all end a sign-in here.
 		onRevoked: async id => {
@@ -200,7 +242,11 @@ export function registerAuthRoutes(
 		persist: config.local
 			? (id, grant, revision) => local!.persist(id, grant, revision)
 			: undefined,
-		cookieSuffix: config.local ? `_${config.local.port}` : undefined,
+		cookieSuffix: config.local
+			? `_${config.local.port}`
+			: config.gh
+			? `_${config.gh.port}`
+			: undefined,
 		authorize: async (user, token) => {
 			if (config.local) return admission.allowed(token, user.id);
 			try {
@@ -225,18 +271,12 @@ export function registerAuthRoutes(
 			delay: dependencies.delay,
 		});
 	}
-	let refresh = (refreshToken: string) =>
-		github.refresh({
-			clientId: config.clientId,
-			...(config.clientSecret && !config.local ? { clientSecret: config.clientSecret } : {}),
-			refreshToken,
-		});
-	// AUTH_MODE=local has no client secret to mint a machine its own token pair.
+	// AUTH_MODE=local has no client secret to mint a machine its own token pair, nor gh an App.
 	let machines = new Machines(storage, clock, {
-		key: config.local ? undefined : config.encryptionKey,
+		key: config.local || config.gh ? undefined : config.encryptionKey,
 		origin: config.origin,
 		clientId: config.clientId,
-		refresh,
+		refresh: config.gh ? undefined : refresh,
 		authorize: async (userId, token) => {
 			try {
 				return (await admission.user(token)).id === userId;
@@ -259,13 +299,13 @@ export function registerAuthRoutes(
 		pairings: {},
 		clock,
 	};
+	let allowed = (request: Request) =>
+		(request.headers.get("host") ?? new URL(request.url).host) === new URL(config.origin).host;
+	let mutating = (request: Request) =>
+		allowed(request)
+		&& request.headers.get("origin") === config.origin;
 	if (local) {
 		let flow = local;
-		let allowed = (request: Request) =>
-			(request.headers.get("host") ?? new URL(request.url).host) === new URL(config.origin).host;
-		let mutating = (request: Request) =>
-			allowed(request)
-			&& request.headers.get("origin") === config.origin;
 		let response = (result: { status: string; cookies?: string[]; [key: string]: unknown }) => {
 			let { cookies = [], ...body } = result;
 			let answer = json(body);
@@ -316,11 +356,36 @@ export function registerAuthRoutes(
 		});
 	}
 
-	if (!local) {
+	if (readGhToken) {
+		router.on("POST", "/auth/gh", async request => {
+			if (!mutating(request)) return json({ error: "origin is not allowed" }, 403);
+			try {
+				await sessions.revoke(request);
+				let token = await readGhToken();
+				let profile = await admission.user(token);
+				await storage.users.put({ ...profile, now: clock() });
+				let session = await sessions.issue(profile.id, ghGrant(token));
+				return json({ status: "complete" }, 200, session.cookie);
+			} catch (err) {
+				// Never a 401, which the browser client answers by reloading.
+				let message = err instanceof GhUnavailable || err instanceof AdmissionDenied
+					? err.message
+					: err instanceof GitHubError && err.status === 401
+					? "GitHub rejected the GitHub CLI login; run `gh auth login` again"
+					: err instanceof GitHubError
+					? "GitHub is unavailable"
+					: "Could not sign in";
+				return json({ status: "failed", message });
+			}
+		});
+	}
+
+	// The GitHub App's authorization-code flow; local and gh modes sign in another way.
+	if (!local && !config.gh) {
 		router.on("GET", "/auth/github", async (_request, url) => {
 			let issued = await attempts.issue(returnPath(url, config.origin));
 			let location = github.authorize({
-				clientId: config.clientId,
+				clientId: config.clientId!,
 				redirectUri,
 				state: issued.state,
 				challenge: issued.challenge,
@@ -337,7 +402,7 @@ export function registerAuthRoutes(
 			}
 			let issued = await attempts.issue(undefined, pairing);
 			let location = github.authorize({
-				clientId: config.clientId,
+				clientId: config.clientId!,
 				redirectUri,
 				state: issued.state,
 				challenge: issued.challenge,
@@ -348,7 +413,9 @@ export function registerAuthRoutes(
 
 	router.on("GET", "/auth/github/install", () =>
 		redirected(
-			`https://github.com/apps/${encodeURIComponent(config.appSlug)}/installations/new`,
+			config.gh
+				? GH_CLI_APP_SETTINGS
+				: `https://github.com/apps/${encodeURIComponent(config.appSlug!)}/installations/new`,
 			302,
 			[],
 		));
@@ -361,7 +428,7 @@ export function registerAuthRoutes(
 		return redirected("/?repository_access=changed", 303, []);
 	});
 
-	if (!local) {
+	if (!local && !config.gh) {
 		router.on("GET", "/auth/github/callback", async (request, url) => {
 			let clear = attempts.clearCookie();
 			try {
@@ -375,7 +442,7 @@ export function registerAuthRoutes(
 					return json({ error: "OAuth state is missing or invalid" }, 400, clear);
 				}
 				let grant = await github.exchange({
-					clientId: config.clientId,
+					clientId: config.clientId!,
 					clientSecret: config.clientSecret!,
 					redirectUri,
 					code,
@@ -418,6 +485,7 @@ export function registerAuthRoutes(
 		});
 	}
 
+	let mode = local ? "local" : config.gh ? "gh" : undefined;
 	router.on("GET", "/api/session", async request => {
 		try {
 			let authenticated = await sessions.authenticate(request);
@@ -439,7 +507,7 @@ export function registerAuthRoutes(
 				? json({
 					agent: dependencies.agent ?? true,
 					...(dependencies.liveBuild ? { liveBuild: true } : {}),
-					...(local ? { auth: "local" } : {}),
+					...(mode ? { auth: mode } : {}),
 					...(config.demoPersonas ? { demo: { actors: demoRoster(config).list() } } : {}),
 					...(dependencies.setupAgents?.length ? { setupAgents: dependencies.setupAgents } : {}),
 					installUrl: "/auth/github/install",
@@ -454,7 +522,7 @@ export function registerAuthRoutes(
 					user: null,
 					agent: dependencies.agent ?? true,
 					...(dependencies.liveBuild ? { liveBuild: true } : {}),
-					...(local ? { auth: "local" } : {}),
+					...(mode ? { auth: mode } : {}),
 				});
 			if (restoredCookie) reply.headers.append("set-cookie", restoredCookie);
 			if (clearBinding) reply.headers.append("set-cookie", local!.clearBinding);

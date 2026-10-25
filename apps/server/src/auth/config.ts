@@ -1,13 +1,16 @@
 import { createHash } from "node:crypto";
 export type AuthConfig = {
 	origin: string;
-	appSlug: string;
-	clientId: string;
+	/** Absent only when `gh` is set: that mode uses no GitHub App. */
+	appSlug?: string;
+	clientId?: string;
 	clientSecret?: string;
 	encryptionKey: Uint8Array;
 	allowedUsers?: ReadonlySet<string>;
 	allowedOrganizations?: ReadonlySet<string>;
 	local?: { installation: string; credentialsDir: string; port: number };
+	/** AUTH_MODE=gh: the operator's GitHub CLI login supplies the one user's token. */
+	gh?: { port: number; command: string };
 	demoPersonas?: true;
 };
 
@@ -62,36 +65,39 @@ function allowed(
 }
 
 export function loadAuth(port = 8787, host = process.env.SERVER_HOST || "127.0.0.1"): AuthConfig {
-	let appSlug = process.env.GITHUB_APP_SLUG;
-	let clientId = process.env.GITHUB_APP_CLIENT_ID;
-	let clientSecret = process.env.GITHUB_APP_CLIENT_SECRET;
 	let mode = process.env.AUTH_MODE || "hosted";
-	if (mode !== "hosted" && mode !== "local") throw new Error("AUTH_MODE must be hosted or local");
-	if (!appSlug || !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(appSlug)) {
+	if (mode !== "hosted" && mode !== "local" && mode !== "gh") {
+		throw new Error("AUTH_MODE must be hosted, local, or gh");
+	}
+	let gh = mode === "gh";
+	let appSlug = gh ? undefined : process.env.GITHUB_APP_SLUG;
+	let clientId = gh ? undefined : process.env.GITHUB_APP_CLIENT_ID;
+	let clientSecret = gh ? undefined : process.env.GITHUB_APP_CLIENT_SECRET;
+	if (!gh && (!appSlug || !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(appSlug))) {
 		throw new Error("GITHUB_APP_SLUG must be a lowercase GitHub App slug");
 	}
-	if (!clientId) throw new Error("GITHUB_APP_CLIENT_ID is required");
+	if (!gh && !clientId) throw new Error("GITHUB_APP_CLIENT_ID is required");
 	if (!clientSecret && mode === "hosted") {
 		throw new Error("GITHUB_APP_CLIENT_SECRET is required");
 	}
 	let appOrigin = origin(process.env.APP_ORIGIN);
 	if (
-		mode === "local" && (
+		mode !== "hosted" && (
 			!["127.0.0.1", "::1", "localhost"].includes(host)
 			|| !["localhost", "127.0.0.1", "[::1]"].includes(new URL(appOrigin).hostname)
 			|| Number(new URL(appOrigin).port || (new URL(appOrigin).protocol === "https:" ? 443 : 80))
 				!== port
 		)
-	) throw new Error("AUTH_MODE=local requires a loopback SERVER_HOST and APP_ORIGIN on PORT");
+	) throw new Error(`AUTH_MODE=${mode} requires a loopback SERVER_HOST and APP_ORIGIN on PORT`);
 	let demo = process.env.DEMO_PERSONAS || "off";
 	if (demo !== "on" && demo !== "off") throw new Error("DEMO_PERSONAS must be on or off");
-	if (demo === "on" && mode !== "local") {
-		throw new Error("DEMO_PERSONAS=on requires AUTH_MODE=local on a loopback bind");
+	if (demo === "on" && mode === "hosted") {
+		throw new Error("DEMO_PERSONAS=on requires AUTH_MODE=local or gh on a loopback bind");
 	}
 	return {
 		origin: appOrigin,
-		appSlug,
-		clientId,
+		...(appSlug ? { appSlug } : {}),
+		...(clientId ? { clientId } : {}),
 		...(clientSecret ? { clientSecret } : {}),
 		encryptionKey: encryptionKey(process.env.SESSION_ENCRYPTION_KEY),
 		...(mode === "local"
@@ -111,6 +117,7 @@ export function loadAuth(port = 8787, host = process.env.SERVER_HOST || "127.0.0
 				},
 			}
 			: {}),
+		...(gh ? { gh: { port, command: process.env.CHOPIN_GH_PATH || "gh" } } : {}),
 		...(demo === "on" ? { demoPersonas: true as const } : {}),
 		allowedUsers: allowed(
 			"GITHUB_ALLOWED_USERS",

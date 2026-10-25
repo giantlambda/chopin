@@ -293,6 +293,24 @@ describe("configuration", () => {
 		);
 	});
 
+	it("runs on the GitHub CLI login without a GitHub App only at the exact loopback port", () => {
+		let gh = {
+			AUTH_MODE: "gh",
+			GITHUB_APP_SLUG: undefined,
+			GITHUB_APP_CLIENT_ID: undefined,
+			GITHUB_APP_CLIENT_SECRET: undefined,
+			APP_ORIGIN: "http://127.0.0.1:8790",
+			PORT: "8790",
+			SERVER_HOST: "127.0.0.1",
+		};
+		let config = configured(gh);
+		expect(config.auth.gh).toEqual({ port: 8790, command: "gh" });
+		expect(description(config)).toContain("auth: github CLI login (unrestricted)");
+		expect(description(config)).not.toContain("device flow");
+		expect(() => configured({ ...gh, SERVER_HOST: "0.0.0.0" })).toThrow("loopback");
+		expect(() => configured({ ...gh, APP_ORIGIN: "http://127.0.0.1:8791" })).toThrow("loopback");
+	});
+
 	it("reads deployment-defined setup agents, and refuses a malformed one at startup", () => {
 		expect(configured().setupAgents).toEqual([]);
 		let acme = {

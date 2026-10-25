@@ -15,7 +15,7 @@ export type Session = {
 	setupAgents?: SetupAgent[];
 	installUrl?: string;
 	expiresAt?: string;
-	auth?: "local";
+	auth?: "local" | "gh";
 	demo?: { actors: { id: string; name: string; avatar: string }[] };
 };
 
@@ -169,8 +169,17 @@ async function validatedPage<T>(path: string, ifNoneMatch?: string): Promise<Val
 	return { page: await decoded<T>(result), ...(etag ? { etag } : {}) };
 }
 
-export function session(): Promise<Session> {
-	return response("/api/session");
+let signInMode: Session["auth"];
+
+export async function session(): Promise<Session> {
+	let value = await response<Session>("/api/session");
+	signInMode = value.auth;
+	return value;
+}
+
+/** How this deployment signs people in, as the last session reply said. */
+export function authMode(): Session["auth"] {
+	return signInMode;
 }
 
 export function navigation(): Promise<Navigation> {
